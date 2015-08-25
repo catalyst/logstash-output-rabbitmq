@@ -19,7 +19,7 @@ class LogStash::Outputs::RabbitMQ < LogStash::Outputs::Base
   config_name "rabbitmq"
 
   # RabbitMQ server address
-  config :host, :validate => :string, :required => true
+  config :host, :validate => :array, :required => true
 
   # RabbitMQ port to connect on
   config :port, :validate => :number, :default => 5672
@@ -65,6 +65,10 @@ class LogStash::Outputs::RabbitMQ < LogStash::Outputs::Base
   # Time in seconds to wait before retrying a connection
   config :connect_retry_interval, :validate => :number, :default => 1
 
+  # Should not be needed for anything other than testing
+  # If set to true that always chooses the first host in an array
+  config :connect_to_random, :validate => :boolean, :default => true
+
   def initialize(params)
     params["codec"] = "json" if !params["codec"]
 
@@ -73,6 +77,14 @@ class LogStash::Outputs::RabbitMQ < LogStash::Outputs::Base
 
   public
   def register
+    # Choose a host to connect to if there is a choice
+    if !@connect_to_random or @host.length == 1 then
+      @cur_index = 0
+      @automatic_recovery = false # Handle it somewhat manually instead
+    else
+      @cur_index = rand(@host.length)
+    end
+
     connect!
     @codec.on_event(&method(:publish))
   end
@@ -98,6 +110,8 @@ class LogStash::Outputs::RabbitMQ < LogStash::Outputs::Base
                   :backtrace => e.backtrace)
 
     sleep_for_retry
+
+    connect! if @host.length > 1
     retry
   end
 
@@ -115,12 +129,16 @@ class LogStash::Outputs::RabbitMQ < LogStash::Outputs::Base
 
   private
   def settings
-    return @settings if @settings
+    # Do not cache settings if failing over to multiple servers
+    return @settings if @settings and @host.length == 1
+
+    host, port = @host[@cur_index].split(":")
+    @cur_index = (@cur_index + 1) % @host.length
 
     s = {
       :vhost => @vhost,
-      :host  => @host,
-      :port  => @port,
+      :host  => host,
+      :port  => Integer(port || @port),
       :user  => @user,
       :automatic_recovery => @automatic_recovery,
       :pass => @password ? @password.value : "guest",
